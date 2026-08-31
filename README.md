@@ -250,6 +250,12 @@ unset or relative, and never inside a worktree: the minion's own bash tool is ha
 `PI_SESSION_FILE`, and a transcript inside a worktree is one stray `git add -A` away
 from being committed.
 
+"Inside a worktree" is decided by device and inode rather than by path spelling,
+because one directory has several valid absolute spellings: `/var` is a symlink to
+`/private/var`, the default macOS volume is case-insensitive, and any symlink names
+a directory again. A state root or a trace reached through any of those spellings is
+refused the same way as the direct one.
+
 Each run gets `runs/<task>/<runId>/` holding its `agent/` config directory, its
 `sessions/` directory and a `run.json` marker. Every `run` sweeps state older than
 30 days. The sweep removes only expired state that carries a `pi-x` marker and whose

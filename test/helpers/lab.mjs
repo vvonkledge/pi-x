@@ -203,6 +203,58 @@ export function stateRunDirs(lab) {
   return dirs;
 }
 
+// Filesystem identity, deliberately derived a different way from the production
+// guard: this resolves symlinks first and then compares device and inode, so a
+// test that passes is evidence about where a file lives and not a restatement of
+// how `isInside` decides.
+export function sameDirectory(a, b) {
+  try {
+    const left = fs.statSync(fs.realpathSync(a));
+    const right = fs.statSync(fs.realpathSync(b));
+    return left.dev === right.dev && left.ino === right.ino;
+  } catch {
+    return false;
+  }
+}
+
+export function isUnder(dir, target) {
+  const anchor = fs.statSync(dir);
+  let current = fs.realpathSync(target);
+  for (;;) {
+    const stat = fs.statSync(current);
+    if (stat.dev === anchor.dev && stat.ino === anchor.ino) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+// Every other absolute spelling this filesystem answers to for the worktree.
+// Each entry is a spelling a caller could reasonably type; a guard that compares
+// strings accepts all of them. Spellings this filesystem does not provide are
+// absent rather than faked, so a test can say honestly what it could not cover.
+export function worktreeAliases(lab) {
+  const aliases = [];
+
+  // /var is a symlink to /private/var on macOS, so every temp worktree already
+  // has two spellings without anything being crafted.
+  const resolved = fs.realpathSync(lab.worktree);
+  if (resolved !== lab.worktree) aliases.push({ label: "resolved prefix", spelling: resolved });
+
+  // The default macOS volume is case-insensitive; ext4 and friends are not.
+  const varied = path.join(lab.root, path.basename(lab.worktree).toUpperCase());
+  if (varied !== lab.worktree && sameDirectory(lab.worktree, varied)) {
+    aliases.push({ label: "case variant", spelling: varied });
+  }
+
+  // An ordinary symlink beside the worktree, available on every platform.
+  const link = path.join(lab.root, "worktree-link");
+  if (!fs.existsSync(link)) fs.symlinkSync(lab.worktree, link);
+  aliases.push({ label: "symlink", spelling: link });
+
+  return aliases;
+}
+
 export function isAlive(pid) {
   try {
     process.kill(pid, 0);

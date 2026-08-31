@@ -21,7 +21,45 @@ export function stateRoot(processEnv = process.env) {
   return path.join(base, "pi-x");
 }
 
+// Containment is a question about directories, not about strings. One directory
+// answers to many valid absolute spellings on the platforms this runs on: /var
+// is a symlink to /private/var, the default macOS volume is case-insensitive,
+// and any symlink beside a worktree names it a second time. A guard that
+// compares spellings therefore holds for the one the caller happened to type and
+// for no other, which is not a refusal at all. Device and inode name the
+// directory itself, so they are what this compares.
+//
+// The child is usually a path that does not exist yet - a trace file, a state
+// root about to be created - so the walk climbs from the child towards the root
+// and asks each ancestor whether it is the parent. The first existing ancestor
+// under a symlinked or case-varied spelling stats to the real directory, which
+// is how those spellings are caught.
 export function isInside(parent, child) {
+  const anchor = identity(parent);
+  if (anchor === null) return lexicallyInside(parent, child);
+  for (let current = child; ; ) {
+    const here = identity(current);
+    if (here !== null && here.dev === anchor.dev && here.ino === anchor.ino) return true;
+    const next = path.dirname(current);
+    // Nothing above the filesystem root is left to ask. Fall back to the string
+    // comparison rather than answering "outside": a stat that failed on every
+    // ancestor is missing evidence, and missing evidence must not open the gate.
+    if (next === current) return lexicallyInside(parent, child);
+    current = next;
+  }
+}
+
+function identity(target) {
+  try {
+    // Follows symlinks on purpose: a link is a spelling of what it points at.
+    const stat = fs.statSync(target);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch {
+    return null;
+  }
+}
+
+function lexicallyInside(parent, child) {
   const relative = path.relative(parent, child);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }

@@ -6,7 +6,15 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { FAKE_SECRETS, makeLab, outcomeOf, runPix, writeSpec } from "./helpers/lab.mjs";
+import {
+  FAKE_SECRETS,
+  isUnder,
+  makeLab,
+  outcomeOf,
+  runPix,
+  worktreeAliases,
+  writeSpec,
+} from "./helpers/lab.mjs";
 
 function refusedBy(result, check) {
   assert.equal(result.code, 40);
@@ -178,6 +186,77 @@ test("a trace inside the worktree is refused", async (t) => {
   refusedBy(result, "trace.path");
   noAgentRan(lab);
   assert.equal(fs.existsSync(path.join(lab.worktree, "trace.jsonl")), false);
+});
+
+// The refusals above use the spelling of the worktree that the spec happens to
+// carry. These use every other spelling of the same directory, because a guard
+// that only knows the caller's spelling is not a guard. Evidence here is the
+// worktree itself: it must still be empty afterwards, which no path predicate can
+// talk its way out of.
+//
+// `run` rather than `preflight`, because a run is where the trace, the run
+// directory, the model snapshot and the session would be written.
+
+test("a trace under any other spelling of the worktree is refused", async (t) => {
+  const lab = makeLab(t);
+  writeSpec(lab);
+  const aliases = worktreeAliases(lab);
+  assert.ok(aliases.length > 0, "this filesystem offered no second spelling to test");
+
+  for (const { label, spelling } of aliases) {
+    const result = await runPix(lab, [
+      "run",
+      "--spec",
+      lab.specPath,
+      "--trace",
+      path.join(spelling, "trace.jsonl"),
+    ]);
+    refusedBy(result, "trace.path");
+    noAgentRan(lab);
+    assert.deepEqual(fs.readdirSync(lab.worktree), [], `${label} wrote into the worktree`);
+  }
+});
+
+test("a state root under any other spelling of the worktree is refused", async (t) => {
+  const lab = makeLab(t);
+  writeSpec(lab);
+  const aliases = worktreeAliases(lab);
+  assert.ok(aliases.length > 0, "this filesystem offered no second spelling to test");
+
+  for (const { label, spelling } of aliases) {
+    const result = await runPix(lab, ["run", "--spec", lab.specPath], {
+      extra: { XDG_STATE_HOME: path.join(spelling, "state") },
+    });
+    refusedBy(result, "state.root");
+    noAgentRan(lab);
+    assert.deepEqual(fs.readdirSync(lab.worktree), [], `${label} wrote into the worktree`);
+  }
+});
+
+test("the aliases a filesystem cannot provide are named rather than assumed", (t) => {
+  const lab = makeLab(t);
+  const labels = worktreeAliases(lab).map((alias) => alias.label);
+  assert.ok(labels.includes("symlink"), "a symlink alias is available on every platform");
+  // The other two exist only where the platform provides them. Recorded so a run
+  // on a case-sensitive filesystem, or one without the /private prefix, says what
+  // it did not exercise instead of reporting coverage it did not have.
+  t.diagnostic(`worktree aliases exercised: ${labels.join(", ")}`);
+});
+
+test("a trace and a state root beside the worktree are still accepted", async (t) => {
+  const lab = makeLab(t);
+  writeSpec(lab);
+  // A sibling whose name has the worktree's name as a prefix, and a state root
+  // one level up: both are outside, and neither may be refused.
+  const sibling = path.join(lab.root, `${path.basename(lab.worktree)}-sibling`);
+  fs.mkdirSync(sibling, { recursive: true });
+  const trace = path.join(sibling, "trace.jsonl");
+
+  const result = await runPix(lab, ["run", "--spec", lab.specPath, "--trace", trace]);
+  assert.equal(result.code, 0);
+  assert.equal(outcomeOf(result).outcome, "settled-ok");
+  assert.ok(fs.statSync(trace).size > 0);
+  assert.equal(isUnder(lab.worktree, trace), false);
 });
 
 test("a refusal names the check but never the offending value", async (t) => {

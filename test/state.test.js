@@ -33,6 +33,16 @@ function plantRun(root, { task, runId, marker, ageDays }) {
   return dir;
 }
 
+function caseInsensitive(real, varied) {
+  try {
+    const a = fs.statSync(real);
+    const b = fs.statSync(varied);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
 const DEAD_PID = 2_147_483_646;
 
 test("the state root follows XDG_STATE_HOME and falls back outside any worktree", () => {
@@ -43,10 +53,48 @@ test("the state root follows XDG_STATE_HOME and falls back outside any worktree"
 });
 
 test("isInside recognises a path under a worktree", () => {
+  // Neither of these exists, so this is the string fallback: it must still be
+  // able to answer, and it must still refuse a sibling whose name shares a prefix.
   assert.equal(isInside("/w", "/w/state"), true);
   assert.equal(isInside("/w", "/w"), true);
   assert.equal(isInside("/w", "/other/state"), false);
   assert.equal(isInside("/w", "/worktree-sibling"), false);
+});
+
+test("isInside answers about the directory and not about the spelling", (t) => {
+  const root = tempRoot(t);
+  const worktree = path.join(root, "worktree");
+  fs.mkdirSync(worktree);
+
+  // The child of a containment check is normally a path that does not exist yet.
+  assert.equal(isInside(worktree, path.join(worktree, "state", "pi-x")), true);
+  assert.equal(isInside(worktree, path.join(root, "state", "pi-x")), false);
+
+  // /var is a symlink to /private/var on macOS, so the same temp directory has
+  // two absolute spellings without anything being crafted.
+  const resolved = fs.realpathSync(worktree);
+  if (resolved !== worktree) {
+    assert.equal(isInside(worktree, path.join(resolved, "trace.jsonl")), true);
+    assert.equal(isInside(resolved, path.join(worktree, "trace.jsonl")), true);
+  } else {
+    t.diagnostic("no resolved-prefix alias on this filesystem");
+  }
+
+  const link = path.join(root, "link");
+  fs.symlinkSync(worktree, link);
+  assert.equal(isInside(worktree, path.join(link, "state", "pi-x")), true);
+  // A symlink pointing somewhere else is not a second spelling of the worktree.
+  const elsewhere = path.join(root, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync(elsewhere, path.join(root, "elsewhere-link"));
+  assert.equal(isInside(worktree, path.join(root, "elsewhere-link", "trace.jsonl")), false);
+
+  const varied = path.join(root, "WORKTREE");
+  if (caseInsensitive(worktree, varied)) {
+    assert.equal(isInside(worktree, path.join(varied, "state", "pi-x")), true);
+  } else {
+    t.diagnostic("case-sensitive filesystem: no case-varied spelling to test");
+  }
 });
 
 test("a run gets its own config and session directories and a pix-owned marker", (t) => {

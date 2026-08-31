@@ -10,6 +10,7 @@ import test from "node:test";
 
 import {
   CREDENTIAL_PLACEHOLDER,
+  isUnder,
   makeLab,
   outcomeOf,
   populateCaptainHome,
@@ -42,8 +43,10 @@ test("a real run settles ok and reports the Pi version it observed", async (t) =
   assert.equal(outcome.detail.lastStopReason, "stop");
 
   // The session lives outside the worktree and is findable from the outcome.
+  // Resolved containment, not a string prefix: one directory has several valid
+  // spellings, so a prefix comparison is not evidence about where the file is.
   assert.ok(fs.existsSync(outcome.detail.sessionFile));
-  assert.equal(outcome.detail.sessionFile.startsWith(lab.worktree), false);
+  assert.equal(isUnder(lab.worktree, outcome.detail.sessionFile), false);
   assert.equal(fs.readdirSync(lab.worktree).length, 0);
 });
 
