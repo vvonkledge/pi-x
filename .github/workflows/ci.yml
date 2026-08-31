@@ -45,6 +45,7 @@ jobs:
           node --version
           npm --version
           just --version
+          ./node_modules/.bin/pi --version
 
       - name: just test
         run: just test
