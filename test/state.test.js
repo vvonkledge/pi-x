@@ -97,6 +97,40 @@ test("isInside answers about the directory and not about the spelling", (t) => {
   }
 });
 
+test("isInside follows a link that lands below the worktree, not only on it", (t) => {
+  const root = tempRoot(t);
+  const worktree = path.join(root, "worktree");
+  const nested = path.join(worktree, "nested");
+  fs.mkdirSync(nested, { recursive: true });
+
+  // A link onto a directory inside the worktree. Climbing the caller's string
+  // would never pass through the worktree, so only the resolved walk sees this.
+  fs.symlinkSync(nested, path.join(root, "nested-link"));
+  assert.equal(isInside(worktree, path.join(root, "nested-link", "trace.jsonl")), true);
+  assert.equal(isInside(worktree, path.join(root, "nested-link", "state", "pi-x")), true);
+
+  // A link as the final component, onto a file that exists.
+  const existing = path.join(worktree, "trace.jsonl");
+  fs.writeFileSync(existing, "");
+  fs.symlinkSync(existing, path.join(root, "file-link"));
+  assert.equal(isInside(worktree, path.join(root, "file-link")), true);
+
+  // A link as the final component, onto a file that does not exist yet, which is
+  // what a trace path is: `open(..., "w")` would follow it and create the file
+  // inside the worktree.
+  fs.symlinkSync(path.join(worktree, "absent.jsonl"), path.join(root, "dangling-link"));
+  assert.equal(isInside(worktree, path.join(root, "dangling-link")), true);
+
+  // A link that dangles outside the worktree stays outside.
+  fs.symlinkSync(path.join(root, "absent.jsonl"), path.join(root, "outside-link"));
+  assert.equal(isInside(worktree, path.join(root, "outside-link")), false);
+
+  // A cycle of dangling links resolves to nothing and must not hang.
+  fs.symlinkSync(path.join(root, "loop-b"), path.join(root, "loop-a"));
+  fs.symlinkSync(path.join(root, "loop-a"), path.join(root, "loop-b"));
+  assert.equal(isInside(worktree, path.join(root, "loop-a")), false);
+});
+
 test("a run gets its own config and session directories and a pix-owned marker", (t) => {
   const root = tempRoot(t);
   const first = createRunState({ root, task: "demo", runId: "run-1", pid: process.pid });

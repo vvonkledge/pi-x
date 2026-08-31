@@ -30,14 +30,15 @@ export function stateRoot(processEnv = process.env) {
 // directory itself, so they are what this compares.
 //
 // The child is usually a path that does not exist yet - a trace file, a state
-// root about to be created - so the walk climbs from the child towards the root
-// and asks each ancestor whether it is the parent. The first existing ancestor
-// under a symlinked or case-varied spelling stats to the real directory, which
-// is how those spellings are caught.
+// root about to be created - so it is first resolved to the real place it names,
+// and the walk climbs from there. Climbing the caller's string instead would
+// only catch links that land on the worktree itself and would miss every link
+// that lands somewhere below it.
 export function isInside(parent, child) {
   const anchor = identity(parent);
-  if (anchor === null) return lexicallyInside(parent, child);
-  for (let current = child; ; ) {
+  const resolved = resolveDeepest(child);
+  if (anchor === null || resolved === null) return lexicallyInside(parent, child);
+  for (let current = resolved; ; ) {
     const here = identity(current);
     if (here !== null && here.dev === anchor.dev && here.ino === anchor.ino) return true;
     const next = path.dirname(current);
@@ -46,6 +47,44 @@ export function isInside(parent, child) {
     // ancestor is missing evidence, and missing evidence must not open the gate.
     if (next === current) return lexicallyInside(parent, child);
     current = next;
+  }
+}
+
+// The deepest ancestor of `target` that exists, with every symlink along it
+// resolved. What is asked about is where a write would land, so a link is
+// followed even when it dangles: `open(..., "w")` follows a dangling link and
+// creates the file at its target, and a trace pointed that way would land inside
+// the worktree with nothing having existed to stat.
+const MAX_LINK_HOPS = 32;
+function resolveDeepest(target) {
+  let current = target;
+  let hops = 0;
+  for (;;) {
+    try {
+      return fs.realpathSync(current);
+    } catch {
+      const link = readlink(current);
+      if (link !== null) {
+        // A cycle of dangling links has no fixed point, so following them is
+        // bounded the way the kernel bounds its own resolution.
+        if ((hops += 1) > MAX_LINK_HOPS) return null;
+        current = path.resolve(path.dirname(current), link);
+        continue;
+      }
+      // Climbing terminates: dirname strictly shortens until it reaches the
+      // root, and realpath of the root does not fail.
+      const next = path.dirname(current);
+      if (next === current) return null;
+      current = next;
+    }
+  }
+}
+
+function readlink(target) {
+  try {
+    return fs.lstatSync(target).isSymbolicLink() ? fs.readlinkSync(target) : null;
+  } catch {
+    return null;
   }
 }
 

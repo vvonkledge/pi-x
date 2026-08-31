@@ -233,6 +233,46 @@ test("a state root under any other spelling of the worktree is refused", async (
   }
 });
 
+// A link that lands below the worktree rather than on it. Nothing on the way to
+// it is the worktree, so this is only caught by resolving the path before asking.
+test("a path that only resolves inside the worktree is refused", async (t) => {
+  const lab = makeLab(t);
+  writeSpec(lab);
+  const nested = path.join(lab.worktree, "nested");
+  fs.mkdirSync(nested, { recursive: true });
+  fs.symlinkSync(nested, path.join(lab.root, "nested-link"));
+  // A trace path is a file that does not exist yet, and `open(..., "w")` follows
+  // a dangling link to create it.
+  fs.symlinkSync(path.join(lab.worktree, "absent.jsonl"), path.join(lab.root, "dangling-link"));
+
+  const viaNested = await runPix(lab, [
+    "run",
+    "--spec",
+    lab.specPath,
+    "--trace",
+    path.join(lab.root, "nested-link", "trace.jsonl"),
+  ]);
+  refusedBy(viaNested, "trace.path");
+
+  const viaDangling = await runPix(lab, [
+    "run",
+    "--spec",
+    lab.specPath,
+    "--trace",
+    path.join(lab.root, "dangling-link"),
+  ]);
+  refusedBy(viaDangling, "trace.path");
+
+  const state = await runPix(lab, ["run", "--spec", lab.specPath], {
+    extra: { XDG_STATE_HOME: path.join(lab.root, "nested-link", "state") },
+  });
+  refusedBy(state, "state.root");
+
+  noAgentRan(lab);
+  assert.deepEqual(fs.readdirSync(nested), [], "a link wrote into the worktree");
+  assert.deepEqual(fs.readdirSync(lab.worktree), ["nested"]);
+});
+
 test("the aliases a filesystem cannot provide are named rather than assumed", (t) => {
   const lab = makeLab(t);
   const labels = worktreeAliases(lab).map((alias) => alias.label);
