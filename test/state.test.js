@@ -1,0 +1,217 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  createRunState,
+  isInside,
+  RETENTION_DAYS,
+  runsRoot,
+  stateRoot,
+  sweepRetention,
+} from "../src/state.js";
+
+function tempRoot(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pix-state-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function plantRun(root, { task, runId, marker, ageDays }) {
+  const dir = path.join(runsRoot(root), task, runId);
+  fs.mkdirSync(dir, { recursive: true });
+  if (marker !== null) {
+    fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(marker));
+  }
+  fs.writeFileSync(path.join(dir, "payload"), "x");
+  if (ageDays !== undefined) {
+    const when = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000);
+    fs.utimesSync(dir, when, when);
+  }
+  return dir;
+}
+
+function caseInsensitive(real, varied) {
+  try {
+    const a = fs.statSync(real);
+    const b = fs.statSync(varied);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
+const DEAD_PID = 2_147_483_646;
+
+test("the state root follows XDG_STATE_HOME and falls back outside any worktree", () => {
+  assert.equal(stateRoot({ XDG_STATE_HOME: "/abs/state" }), path.join("/abs/state", "pi-x"));
+  assert.equal(stateRoot({}), path.join(os.homedir(), ".local", "state", "pi-x"));
+  // A relative XDG value could resolve inside whatever directory pix was run in.
+  assert.equal(stateRoot({ XDG_STATE_HOME: "state" }), path.join(os.homedir(), ".local", "state", "pi-x"));
+});
+
+test("isInside recognises a path under a worktree", () => {
+  // Neither of these exists, so this is the string fallback: it must still be
+  // able to answer, and it must still refuse a sibling whose name shares a prefix.
+  assert.equal(isInside("/w", "/w/state"), true);
+  assert.equal(isInside("/w", "/w"), true);
+  assert.equal(isInside("/w", "/other/state"), false);
+  assert.equal(isInside("/w", "/worktree-sibling"), false);
+});
+
+test("isInside answers about the directory and not about the spelling", (t) => {
+  const root = tempRoot(t);
+  const worktree = path.join(root, "worktree");
+  fs.mkdirSync(worktree);
+
+  // The child of a containment check is normally a path that does not exist yet.
+  assert.equal(isInside(worktree, path.join(worktree, "state", "pi-x")), true);
+  assert.equal(isInside(worktree, path.join(root, "state", "pi-x")), false);
+
+  // /var is a symlink to /private/var on macOS, so the same temp directory has
+  // two absolute spellings without anything being crafted.
+  const resolved = fs.realpathSync(worktree);
+  if (resolved !== worktree) {
+    assert.equal(isInside(worktree, path.join(resolved, "trace.jsonl")), true);
+    assert.equal(isInside(resolved, path.join(worktree, "trace.jsonl")), true);
+  } else {
+    t.diagnostic("no resolved-prefix alias on this filesystem");
+  }
+
+  const link = path.join(root, "link");
+  fs.symlinkSync(worktree, link);
+  assert.equal(isInside(worktree, path.join(link, "state", "pi-x")), true);
+  // A symlink pointing somewhere else is not a second spelling of the worktree.
+  const elsewhere = path.join(root, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync(elsewhere, path.join(root, "elsewhere-link"));
+  assert.equal(isInside(worktree, path.join(root, "elsewhere-link", "trace.jsonl")), false);
+
+  const varied = path.join(root, "WORKTREE");
+  if (caseInsensitive(worktree, varied)) {
+    assert.equal(isInside(worktree, path.join(varied, "state", "pi-x")), true);
+  } else {
+    t.diagnostic("case-sensitive filesystem: no case-varied spelling to test");
+  }
+});
+
+test("isInside follows a link that lands below the worktree, not only on it", (t) => {
+  const root = tempRoot(t);
+  const worktree = path.join(root, "worktree");
+  const nested = path.join(worktree, "nested");
+  fs.mkdirSync(nested, { recursive: true });
+
+  // A link onto a directory inside the worktree. Climbing the caller's string
+  // would never pass through the worktree, so only the resolved walk sees this.
+  fs.symlinkSync(nested, path.join(root, "nested-link"));
+  assert.equal(isInside(worktree, path.join(root, "nested-link", "trace.jsonl")), true);
+  assert.equal(isInside(worktree, path.join(root, "nested-link", "state", "pi-x")), true);
+
+  // A link as the final component, onto a file that exists.
+  const existing = path.join(worktree, "trace.jsonl");
+  fs.writeFileSync(existing, "");
+  fs.symlinkSync(existing, path.join(root, "file-link"));
+  assert.equal(isInside(worktree, path.join(root, "file-link")), true);
+
+  // A link as the final component, onto a file that does not exist yet, which is
+  // what a trace path is: `open(..., "w")` would follow it and create the file
+  // inside the worktree.
+  fs.symlinkSync(path.join(worktree, "absent.jsonl"), path.join(root, "dangling-link"));
+  assert.equal(isInside(worktree, path.join(root, "dangling-link")), true);
+
+  // A link that dangles outside the worktree stays outside.
+  fs.symlinkSync(path.join(root, "absent.jsonl"), path.join(root, "outside-link"));
+  assert.equal(isInside(worktree, path.join(root, "outside-link")), false);
+
+  // A cycle of dangling links resolves to nothing and must not hang.
+  fs.symlinkSync(path.join(root, "loop-b"), path.join(root, "loop-a"));
+  fs.symlinkSync(path.join(root, "loop-a"), path.join(root, "loop-b"));
+  assert.equal(isInside(worktree, path.join(root, "loop-a")), false);
+});
+
+test("a run gets its own config and session directories and a pix-owned marker", (t) => {
+  const root = tempRoot(t);
+  const first = createRunState({ root, task: "demo", runId: "run-1", pid: process.pid });
+  const second = createRunState({ root, task: "demo", runId: "run-2", pid: process.pid });
+
+  assert.notEqual(first.agentDir, second.agentDir);
+  assert.notEqual(first.sessionDir, second.sessionDir);
+  assert.ok(fs.statSync(first.agentDir).isDirectory());
+  assert.ok(fs.statSync(first.sessionDir).isDirectory());
+
+  const marker = JSON.parse(fs.readFileSync(path.join(first.dir, "run.json"), "utf8"));
+  assert.equal(marker.owner, "pi-x");
+  assert.equal(marker.task, "demo");
+  assert.equal(marker.pid, process.pid);
+});
+
+test("retention removes expired pix state and nothing else", (t) => {
+  const root = tempRoot(t);
+  const expired = plantRun(root, {
+    task: "demo",
+    runId: "expired",
+    marker: { owner: "pi-x", pid: DEAD_PID },
+    ageDays: RETENTION_DAYS + 1,
+  });
+  const recent = plantRun(root, {
+    task: "demo",
+    runId: "recent",
+    marker: { owner: "pi-x", pid: DEAD_PID },
+    ageDays: 1,
+  });
+
+  const swept = sweepRetention(root);
+  assert.deepEqual(swept.removed, [expired]);
+  assert.equal(fs.existsSync(expired), false);
+  assert.equal(fs.existsSync(recent), true);
+});
+
+test("retention refuses live state even when it is old", (t) => {
+  const root = tempRoot(t);
+  const live = plantRun(root, {
+    task: "demo",
+    runId: "live",
+    marker: { owner: "pi-x", pid: process.pid },
+    ageDays: RETENTION_DAYS + 10,
+  });
+
+  const swept = sweepRetention(root);
+  assert.deepEqual(swept.removed, []);
+  assert.ok(swept.kept.some((entry) => entry.dir === live && entry.reason === "live"));
+  assert.equal(fs.existsSync(live), true);
+});
+
+test("retention refuses ambiguous state it does not own", (t) => {
+  const root = tempRoot(t);
+  const unmarked = plantRun(root, { task: "demo", runId: "unmarked", marker: null, ageDays: 400 });
+  const foreign = plantRun(root, {
+    task: "demo",
+    runId: "foreign",
+    marker: { owner: "somebody-else", pid: DEAD_PID },
+    ageDays: 400,
+  });
+  const malformed = path.join(runsRoot(root), "demo", "malformed");
+  fs.mkdirSync(malformed, { recursive: true });
+  fs.writeFileSync(path.join(malformed, "run.json"), "{not json");
+  const old = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+  fs.utimesSync(malformed, old, old);
+
+  const swept = sweepRetention(root);
+  assert.deepEqual(swept.removed, []);
+  for (const dir of [unmarked, foreign, malformed]) {
+    assert.equal(fs.existsSync(dir), true);
+    assert.ok(swept.kept.some((entry) => entry.dir === dir && entry.reason === "ambiguous"));
+  }
+});
+
+test("retention on an empty or missing state root does nothing", (t) => {
+  const root = tempRoot(t);
+  assert.deepEqual(sweepRetention(root), { removed: [], kept: [] });
+  assert.deepEqual(sweepRetention(path.join(root, "absent")), { removed: [], kept: [] });
+});
+
+test("the retention window is thirty days", () => {
+  assert.equal(RETENTION_DAYS, 30);
+});

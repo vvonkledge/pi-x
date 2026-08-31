@@ -8,6 +8,12 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
+  },
+  "bin": {
+    "pix": "bin/pix.js"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2"
   }
 }
